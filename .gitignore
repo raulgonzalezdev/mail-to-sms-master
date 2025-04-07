@@ -48,5 +48,6 @@ pandoc*
 # Venv
 pyvenv.cfg
 client_secret.json
+oauth2_creds.json
 .env
 logs

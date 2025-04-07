@@ -10,6 +10,11 @@ import googleapiclient.discovery
 import json
 import yagmail
 import phonenumbers
+import dotenv
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env
+load_dotenv()
 
 # This variable specifies the name of a file that contains the OAuth 2.0
 # information for this application, including its client_id and client_secret.
@@ -113,6 +118,41 @@ def send_sms():
 
   return print_sms_form() + '<br>' + print_index_table()
 
+@app.route('/send_email', methods=['GET', 'POST'])
+def send_email():
+  """
+  Endpoint para enviar un correo electrónico de prueba usando OAuth2
+  """
+  if 'credentials' not in flask.session:
+    return flask.redirect('authorize')
+
+  features = flask.session['features']
+
+  if not features.get('gmail', False):
+    return '<p>Gmail feature is not enabled. You need to authorize Gmail access.</p>'
+
+  if flask.request.method == 'POST':
+    to_email = flask.request.form.get('to_email')
+    subject = flask.request.form.get('subject')
+    message = flask.request.form.get('message')
+    
+    # Obtener credenciales de la sesión
+    credentials = google.oauth2.credentials.Credentials(
+      **flask.session['credentials'])
+    
+    # Intentar enviar el correo
+    result = send_test_email(to_email, subject, message)
+    
+    # Guardar credenciales actualizadas
+    flask.session['credentials'] = credentials_to_dict(credentials)
+    
+    if result:
+      return '<p>Correo enviado con éxito!</p><br>' + print_email_form() + '<br>' + print_index_table()
+    else:
+      return '<p>Error al enviar el correo. Revisa la consola para más detalles.</p><br>' + print_email_form() + '<br>' + print_index_table()
+
+  return print_email_form() + '<br>' + print_index_table()
+
 def send_mail_to_sms(number, carrier, message, credentials, region='US', mms=False):
   """
   Envía un SMS usando MailToSMS con credenciales OAuth2
@@ -130,18 +170,22 @@ def send_mail_to_sms(number, carrier, message, credentials, region='US', mms=Fal
     # Construir la dirección de destino
     address = f"{number}@{gateway}"
     
-    # Configurar yagmail con las credenciales OAuth2
-    smtp_connection = yagmail.SMTP(
-      user=credentials.client_id,
-      oauth2_file=None,
-      token={
-        'access_token': credentials.token,
-        'refresh_token': credentials.refresh_token
-      }
-    )
+    # Email del usuario
+    user_email = "gqraulpay@gmail.com"
+    
+    # Ruta al archivo de credenciales OAuth2 (creado externamente)
+    oauth2_file = os.path.join(os.path.dirname(__file__), "oauth2_creds.json")
+    
+    print(f"Usando archivo OAuth2: {oauth2_file}")
+    print(f"Enviando a: {address}")
+    
+    # Crear la conexión SMTP con OAuth2 exactamente como indica la documentación
+    yag = yagmail.SMTP(user=user_email, oauth2_file=oauth2_file)
     
     # Enviar el mensaje
-    smtp_connection.send(to=address, contents=message)
+    yag.send(to=address, contents=message)
+    print("Mensaje enviado con éxito")
+    
     return True
   except Exception as e:
     print(f"Error al enviar SMS: {e}")
@@ -273,6 +317,15 @@ def oauth2callback():
   #              credentials in a persistent database instead.
   credentials = flow.credentials
   
+  # Imprimir información de debug sobre las credenciales
+  print("\n\n==== INFORMACIÓN DE CREDENCIALES PARA DEBUG ====")
+  print(f"Token de acceso: {credentials.token}")
+  print(f"Token de refresco: {credentials.refresh_token}")
+  print(f"URI del token: {credentials.token_uri}")
+  print(f"Client ID: {credentials.client_id}")
+  print(f"Scopes concedidos: {credentials.scopes}")
+  print("================================================\n\n")
+  
   credentials = credentials_to_dict(credentials)
   flask.session['credentials'] = credentials
 
@@ -355,7 +408,75 @@ def print_index_table():
           '<td>Clear the access token currently stored in the user session. ' +
           '    After clearing the token, if you <a href="/test">test the ' +
           '    API request</a> again, you should go back to the auth flow.' +
-          '</td></tr></table>')
+          '</td></tr>' +
+          '<tr><td><a href="/send_email">Enviar Correo</a></td>' +
+          '<td>Envía un correo electrónico de prueba usando OAuth2.</td></tr>' +
+          '</table>')
+
+def send_test_email(to_email, subject, message):
+  """
+  Función para enviar un correo de prueba usando yagmail con OAuth2
+  """
+  try:
+    # Email del usuario
+    user_email = "gqraulpay@gmail.com"
+    
+    # Ruta al archivo OAuth2
+    oauth2_file = os.path.join(os.path.dirname(__file__), "oauth2_creds.json")
+    
+    print(f"TEST EMAIL - Usando archivo OAuth2: {oauth2_file}")
+    print(f"TEST EMAIL - Enviando a: {to_email}")
+    
+    try:
+      # Método 1: Probar con formato exacto de la documentación
+      print("TEST EMAIL - Intentando método 1 con formato oficial...")
+      yag = yagmail.SMTP(user=user_email, oauth2_file=oauth2_file)
+      yag.send(to=to_email, subject=subject, contents=message)
+      print("TEST EMAIL - Correo enviado con éxito usando método 1")
+      return True
+    except Exception as e1:
+      print(f"TEST EMAIL - Error método 1: {e1}")
+      
+      # Método 2: Probar cargando el archivo manualmente
+      print("TEST EMAIL - Intentando método 2 con carga manual...")
+      with open(oauth2_file, 'r') as f:
+        oauth_data = json.load(f)
+      
+      # Intentar con formato diferente
+      token_info = {
+        'refresh_token': oauth_data['refresh_token']
+      }
+      
+      yag = yagmail.SMTP(user=user_email)
+      yag.login(oauth2_info=token_info)
+      yag.send(to=to_email, subject=subject, contents=message)
+      print("TEST EMAIL - Correo enviado con éxito usando método 2")
+      return True
+      
+  except Exception as e:
+    print(f"TEST EMAIL - Error al enviar correo: {e}")
+    return False
+
+def print_email_form():
+  """Genera un formulario HTML para enviar correo de prueba"""
+  return f'''
+    <h2>Enviar Correo de Prueba</h2>
+    <form method="post" action="/send_email">
+      <div>
+        <label for="to_email">Dirección de correo:</label>
+        <input type="email" id="to_email" name="to_email" required>
+      </div>
+      <div>
+        <label for="subject">Asunto:</label>
+        <input type="text" id="subject" name="subject" required>
+      </div>
+      <div>
+        <label for="message">Mensaje:</label>
+        <textarea id="message" name="message" required></textarea>
+      </div>
+      <button type="submit">Enviar Correo</button>
+    </form>
+  '''
 
 if __name__ == '__main__':
   # When running locally, disable OAuthlib's HTTPs verification.
@@ -369,4 +490,5 @@ if __name__ == '__main__':
 
   # Specify a hostname and port that are set as a valid redirect URI
   # for your API project in the Google API Console.
+  app.run('localhost', 8080, debug=True)
   app.run('localhost', 8080, debug=True)
