@@ -7,6 +7,9 @@ import requests
 import google.oauth2.credentials
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
+import json
+import yagmail
+import phonenumbers
 
 # This variable specifies the name of a file that contains the OAuth 2.0
 # information for this application, including its client_id and client_secret.
@@ -15,7 +18,8 @@ CLIENT_SECRETS_FILE = "client_secret.json"
 # The OAuth 2.0 access scope allows for access to the
 # authenticated user's account and requires requests to use an SSL connection.
 SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
-          'https://www.googleapis.com/auth/calendar.readonly']
+          'https://www.googleapis.com/auth/calendar.readonly',
+          'https://mail.google.com/']  # Añadido el scope de Gmail
 API_SERVICE_NAME = 'drive'
 API_VERSION = 'v2'
 
@@ -74,6 +78,158 @@ def calendar_api_request():
     # Update UX and application accordingly
     return '<p>Calendar feature is not enabled.</p>'
 
+@app.route('/send_sms', methods=['GET', 'POST'])
+def send_sms():
+  if 'credentials' not in flask.session:
+    return flask.redirect('authorize')
+
+  features = flask.session['features']
+
+  if not features.get('gmail', False):
+    return '<p>Gmail feature is not enabled. You need to authorize Gmail access.</p>'
+
+  if flask.request.method == 'POST':
+    number = flask.request.form.get('phone_number')
+    carrier = flask.request.form.get('carrier')
+    message = flask.request.form.get('message')
+    region = flask.request.form.get('region', 'US')
+    is_mms = flask.request.form.get('is_mms') == 'on'
+
+    # Cargar las credenciales desde la sesión
+    credentials = google.oauth2.credentials.Credentials(
+        **flask.session['credentials'])
+    
+    # Enviar el SMS usando MailToSMS con OAuth2
+    result = send_mail_to_sms(number, carrier, message, credentials, 
+                             region=region, mms=is_mms)
+    
+    # Guardar credenciales actualizadas en la sesión
+    flask.session['credentials'] = credentials_to_dict(credentials)
+    
+    if result:
+      return '<p>Mensaje enviado con éxito!</p><br>' + print_sms_form() + '<br>' + print_index_table()
+    else:
+      return '<p>Error al enviar el mensaje. Por favor, verifica los datos.</p><br>' + print_sms_form() + '<br>' + print_index_table()
+
+  return print_sms_form() + '<br>' + print_index_table()
+
+def send_mail_to_sms(number, carrier, message, credentials, region='US', mms=False):
+  """
+  Envía un SMS usando MailToSMS con credenciales OAuth2
+  """
+  try:
+    # Validar el número de teléfono
+    if not validate_number(number, region):
+      return False
+
+    # Obtener información de carriers
+    gateway = get_sms_gateway(carrier, mms)
+    if not gateway:
+      return False
+
+    # Construir la dirección de destino
+    address = f"{number}@{gateway}"
+    
+    # Configurar yagmail con las credenciales OAuth2
+    smtp_connection = yagmail.SMTP(
+      user=credentials.client_id,
+      oauth2_file=None,
+      token={
+        'access_token': credentials.token,
+        'refresh_token': credentials.refresh_token
+      }
+    )
+    
+    # Enviar el mensaje
+    smtp_connection.send(to=address, contents=message)
+    return True
+  except Exception as e:
+    print(f"Error al enviar SMS: {e}")
+    return False
+
+def validate_number(number, region):
+  """Valida un número de teléfono usando la biblioteca phonenumbers"""
+  try:
+    number = str(number).strip()
+    parsed = phonenumbers.parse(number, region)
+    return (phonenumbers.is_possible_number(parsed) and
+            phonenumbers.is_valid_number(parsed))
+  except Exception as e:
+    print(f"Error validando número: {e}")
+    return False
+
+def get_sms_gateway(carrier, mms=False):
+  """Obtiene el gateway SMS o MMS para un carrier específico"""
+  try:
+    # Cargar el archivo gateways.json
+    gateways_file = os.path.join(os.path.dirname(__file__), "gateways.json")
+    with open(gateways_file, "r") as fd:
+      gateways = json.load(fd)["gateways"]
+      
+    # Buscar el carrier en los gateways
+    for gateway in gateways:
+      if carrier in gateway["carrier_names"]:
+        if mms and "mms" in gateway:
+          return gateway["mms"]
+        elif "sms" in gateway:
+          return gateway["sms"]
+        elif "mms" in gateway:  # Fallback a MMS si no hay SMS
+          return gateway["mms"]
+    
+    return None
+  except Exception as e:
+    print(f"Error obteniendo gateway: {e}")
+    return None
+
+def print_sms_form():
+  """Genera un formulario HTML para enviar SMS"""
+  try:
+    # Cargar los carriers desde gateways.json
+    gateways_file = os.path.join(os.path.dirname(__file__), "gateways.json")
+    with open(gateways_file, "r") as fd:
+      gateways = json.load(fd)["gateways"]
+    
+    # Generar opciones para el dropdown de carriers
+    carrier_options = ""
+    for gateway in gateways:
+      carrier_name = gateway["carrier_names"][0]
+      carrier_options += f'<option value="{carrier_name}">{carrier_name}</option>'
+    
+    # Generar el formulario HTML
+    return f'''
+      <h2>Enviar SMS</h2>
+      <form method="post" action="/send_sms">
+        <div>
+          <label for="phone_number">Número de teléfono:</label>
+          <input type="text" id="phone_number" name="phone_number" required>
+        </div>
+        <div>
+          <label for="carrier">Operador:</label>
+          <select id="carrier" name="carrier" required>
+            {carrier_options}
+          </select>
+        </div>
+        <div>
+          <label for="message">Mensaje:</label>
+          <textarea id="message" name="message" required></textarea>
+        </div>
+        <div>
+          <label for="region">Región (código de país):</label>
+          <input type="text" id="region" name="region" value="US">
+        </div>
+        <div>
+          <label for="is_mms">
+            <input type="checkbox" id="is_mms" name="is_mms">
+            Enviar como MMS
+          </label>
+        </div>
+        <button type="submit">Enviar SMS</button>
+      </form>
+    '''
+  except Exception as e:
+    print(f"Error generando formulario: {e}")
+    return "<p>Error al generar el formulario SMS</p>"
+
 @app.route('/authorize')
 def authorize():
   # Create flow instance to manage the OAuth 2.0 Authorization Grant Flow steps.
@@ -125,7 +281,6 @@ def oauth2callback():
   flask.session['features'] = features
   return flask.redirect('/')
   
-
 @app.route('/revoke')
 def revoke():
   if 'credentials' not in flask.session:
@@ -171,6 +326,11 @@ def check_granted_scopes(credentials):
     features['calendar'] = True
   else:
     features['calendar'] = False
+    
+  if 'https://mail.google.com/' in credentials['granted_scopes']:
+    features['gmail'] = True
+  else:
+    features['gmail'] = False
 
   return features
 
@@ -184,6 +344,8 @@ def print_index_table():
           '<td>Go directly to the authorization flow. If there are stored ' +
           '    credentials, you still might not be prompted to reauthorize ' +
           '    the application.</td></tr>' +
+          '<tr><td><a href="/send_sms">Enviar SMS</a></td>' +
+          '<td>Envía un mensaje SMS utilizando tu cuenta de Gmail con OAuth2.</td></tr>' +
           '<tr><td><a href="/revoke">Revoke current credentials</a></td>' +
           '<td>Revoke the access token associated with the current user ' +
           '    session. After revoking credentials, if you go to the test ' +

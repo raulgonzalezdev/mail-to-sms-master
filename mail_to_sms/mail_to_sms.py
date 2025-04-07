@@ -5,6 +5,8 @@ import os
 
 import yagmail
 import phonenumbers
+import google.oauth2.credentials
+import google_auth_oauthlib.flow
 
 
 class MailToSMS:
@@ -38,24 +40,31 @@ class MailToSMS:
                 This is unnecessary if you're planning on using the basic Gmail interface, 
                     in which case you'll just need the username and password.
                 See: https://github.com/kootenpv/yagmail/blob/master/yagmail/yagmail.py#L49
+            oauth2 {boolean}: Set to True to use OAuth2 authentication. Defaults to False. (ex. oauth2=True)
+            client_secrets_file {string}: Path to client_secret.json file for OAuth2. (ex. client_secrets_file="client_secret.json")
+            credentials {google.oauth2.credentials.Credentials}: OAuth2 credentials. If provided, client_secrets_file is ignored.
+            token {dict}: OAuth2 token containing access_token and refresh_token. Used with oauth2=True.
 
     Examples:
         from mail_to_sms import MailToSMS
 
+        # Using traditional username/password:
         MailToSMS(5551234567, "att", "username@gmail.com", "password", "this is a message")
 
-        MailToSMS("5551234567", "att", "username", "password", ["hello", "world"], subject="hey!")
+        # Using OAuth2 with client_secret.json:
+        MailToSMS(5551234567, "att", contents="this is a message", oauth2=True, client_secrets_file="client_secret.json")
 
-        MailToSMS(5551234567, "att", "username", "password", "hello world!", yagmail=["smtp.gmail.com", "587"])
+        # Using OAuth2 with existing credentials:
+        MailToSMS(5551234567, "att", contents="this is a message", oauth2=True, credentials=my_credentials)
 
-        MailToSMS("5551234567", "att", "username@gmail.com", "password", ["line one"], yagmail=["smtp.gmail.com"])
-
-        mail = MailToSMS(5551234567, "att", "username", "password")
-        mail.send("this is a string!")
+        # Using OAuth2 with token:
+        token = {'access_token': 'ya29.abc123', 'refresh_token': '1//xyzABC...'}
+        MailToSMS(5551234567, "att", contents="this is a message", oauth2=True, token=token)
 
     Requirements:
         yagmail
         phonenumbers
+        google-auth-oauthlib
         click (for the CLI)
     """
 
@@ -69,6 +78,12 @@ class MailToSMS:
     REGION_KEY = "region"
     SUBJECT_KEY = "subject"
     YAGMAIL_KEY = "yagmail"
+    OAUTH2_KEY = "oauth2"
+    CLIENT_SECRETS_FILE_KEY = "client_secrets_file"
+    CREDENTIALS_KEY = "credentials"
+    TOKEN_KEY = "token"
+    DEFAULT_CLIENT_SECRETS_FILE = "client_secret.json"
+    SCOPES = ['https://mail.google.com/']
 
     ## Defaults
     DEFAULT_QUIET = False
@@ -76,6 +91,7 @@ class MailToSMS:
     DEFAULT_REGION = "US"
     DEFAULT_SUBJECT = None
     DEFAULT_YAGMAIL_ARGS = []
+    DEFAULT_OAUTH2 = False
 
 
     def __init__(self, number, carrier, username=None, password=None, contents=None, **kwargs):
@@ -85,7 +101,11 @@ class MailToSMS:
             "region": kwargs.get(self.REGION_KEY, self.DEFAULT_REGION),
             "subject": kwargs.get(self.SUBJECT_KEY, self.DEFAULT_SUBJECT),
             "mms": kwargs.get(self.MMS_KEY, self.DEFAULT_TO_MMS),
-            "yagmail": kwargs.get(self.YAGMAIL_KEY, self.DEFAULT_YAGMAIL_ARGS)
+            "yagmail": kwargs.get(self.YAGMAIL_KEY, self.DEFAULT_YAGMAIL_ARGS),
+            "oauth2": kwargs.get(self.OAUTH2_KEY, self.DEFAULT_OAUTH2),
+            "client_secrets_file": kwargs.get(self.CLIENT_SECRETS_FILE_KEY, self.DEFAULT_CLIENT_SECRETS_FILE),
+            "credentials": kwargs.get(self.CREDENTIALS_KEY, None),
+            "token": kwargs.get(self.TOKEN_KEY, None)
         }
 
         ## Prepare the address to send to, return if it couldn't be generated
@@ -93,15 +113,18 @@ class MailToSMS:
         if(not self.address):
             return
 
-        ## Prepare the passthru args for yagmail
-        yagmail_args = self.config["yagmail"]
-        if(username):
-            yagmail_args.insert(0, username)
-            yagmail_args.insert(1, password)
-
         ## Init the yagmail connection
         try:
-            self.connection = yagmail.SMTP(*yagmail_args)
+            if self.config.get("oauth2"):
+                # Usar autenticación OAuth2
+                self.connection = self._init_oauth2_connection(username)
+            else:
+                # Usar autenticación tradicional con usuario/contraseña
+                yagmail_args = self.config["yagmail"]
+                if(username):
+                    yagmail_args.insert(0, username)
+                    yagmail_args.insert(1, password)
+                self.connection = yagmail.SMTP(*yagmail_args)
         except Exception as e:
             ## You might want to look into using an app password for this.
             self._print_error(e, "Unhandled error creating yagmail connection.")
@@ -113,6 +136,72 @@ class MailToSMS:
             self.send(contents)
 
     ## Methods
+
+    def _init_oauth2_connection(self, username=None):
+        """
+        Inicializa una conexión yagmail usando autenticación OAuth2
+        """
+        credentials = self.config.get("credentials")
+        token = self.config.get("token")
+        client_secrets_file = self.config.get("client_secrets_file")
+        
+        if not credentials and not token and not os.path.exists(client_secrets_file):
+            self._print_error(None, f"OAuth2 file not found: {client_secrets_file}")
+            return None
+            
+        try:
+            # Si no tenemos credenciales pero tenemos el token
+            if not credentials and token:
+                # Si username no está definido, intenta obtenerlo del client_secrets_file
+                if not username and os.path.exists(client_secrets_file):
+                    with open(client_secrets_file, 'r') as f:
+                        client_info = json.load(f)
+                        if 'web' in client_info:
+                            client_id = client_info['web'].get('client_id')
+                            if client_id:
+                                username = client_id
+                
+                # Crear la conexión usando el token proporcionado
+                return yagmail.SMTP(
+                    user=username,
+                    oauth2_file=None,
+                    token=token
+                )
+            
+            # Si tenemos las credenciales directamente
+            elif credentials:
+                token_info = {
+                    'access_token': credentials.token,
+                    'refresh_token': credentials.refresh_token
+                }
+                
+                return yagmail.SMTP(
+                    user=credentials.client_id,
+                    oauth2_file=None,
+                    token=token_info
+                )
+            
+            # Si tenemos que cargar las credenciales desde client_secrets_file
+            else:
+                # Crear el flujo OAuth2 desde el archivo de secretos
+                flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+                    client_secrets_file, self.SCOPES)
+                credentials = flow.run_local_server(port=0)
+                
+                # Crear la conexión usando las credenciales obtenidas
+                token_info = {
+                    'access_token': credentials.token,
+                    'refresh_token': credentials.refresh_token
+                }
+                
+                return yagmail.SMTP(
+                    user=credentials.client_id,
+                    oauth2_file=None,
+                    token=token_info
+                )
+        except Exception as e:
+            self._print_error(e, "Error initializing OAuth2 connection")
+            return None
 
     def _print_error(self, exception, message=None):
         output = []
@@ -227,5 +316,4 @@ class MailToSMS:
             self._print_error(e, "Unhandled error sending mail.")
             return False
         else:
-
             return True
